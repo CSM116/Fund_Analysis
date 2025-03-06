@@ -43,7 +43,7 @@ def load_data(tickers, from_date, today, freq):
     try:
         df = ticker_download(tickers, from_date, freq)
     except:
-        df = yf.download(tickers, from_date, today, interval="1"+freq)
+        df = yf.download(tickers, from_date, today, interval="1"+freq, auto_adjust=False)
         df = df[['Adj Close']].copy()
         for col in df.columns:        
             df[col] = pd.to_numeric(df[col], errors='coerce')
