@@ -1,6 +1,8 @@
 # fund_nlys
 Macro-micro Fundamental Analysis
 
+For proper rendering and visualiastion of jupyter notebook code please use Microsoft Edge or Mozilla Firefox (Chrome might not render code properly).
+
 # Proprietary License
 # 
 # Copyright (c) [2024] Carlos Sebastian Mancero Castillo
