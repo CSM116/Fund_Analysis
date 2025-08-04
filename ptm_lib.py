@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import os
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -13,69 +14,130 @@ pio.renderers.default = 'notebook'
 # pio.renderers.default = "jupyterlab"
 
 import re
+import requests
 
 FRED_URL = 'https://api.stlouisfed.org/fred'
 API_KEY = '4c65ec00c7f4c4f6c8c857294433952b'
-import requests
 
 def loadNupdate(tickers, from_date, to_date, freq, file):
+    """
+    Loads cached data from CSV or downloads it if missing, and updates it if out of date.
+    """
+    import os
+    from datetime import timedelta
+
+    path = os.path.join('datasets', f'{file}.csv')
+
     try:
-        data = pd.read_csv('Tickers/'+file+'.csv', index_col=0, dayfirst=True)
+        # Try loading local CSV
+        data = pd.read_csv(path, index_col=0, dayfirst=True)
         data.index = pd.to_datetime(data.index, errors='coerce')
+        if data.index.isnull().any():
+            raise ValueError("Invalid date entries in CSV")
         data = data.reindex(columns=tickers)
-    except:
+    except (FileNotFoundError, ValueError):
+        # If file doesn't exist or has bad dates, fetch fresh data
         data = load_data(tickers, from_date, to_date, freq)
-        data.to_csv('Tickers/'+file+'.csv')
-    freq = freq[0]
-    delta = {'d':1,'w':5,'m':30,'q':90,'a':260}
-    next_timestamp = data.index[-1]+timedelta(days=delta[freq])
-    print('Next Timestamp:  '+str(next_timestamp))
-    print('To_date Timestamp: '+str(pd.Timestamp(to_date)))
-    if (next_timestamp < pd.Timestamp(to_date)):
+        data.to_csv(path)
+        return data
+
+    # Mapping of frequency shorthand to timedelta estimates
+    freq_key = freq[0].lower()
+    offset = {'d': 1, 'w': 5, 'm': 30, 'q': 90, 'a': 260}
+    next_timestamp = data.index[-1] + timedelta(days=offset.get(freq_key, 1))
+
+    # Check if data needs updating
+    if next_timestamp < pd.Timestamp(to_date):
         df = load_data(tickers, next_timestamp.date(), to_date, freq)
         if df.empty:
             print('No new data')
         else:
             df.index = pd.to_datetime(df.index)
-            data.index = pd.to_datetime(data.index)            
-            data = data.combine_first(df)
-            data.to_csv('Tickers/'+file+'.csv')
-            print('\n Dataset updated and saved \n')
+            data = pd.concat([data, df])
+            data = data[~data.index.duplicated(keep='last')].sort_index()
+            data.to_csv(path)
+            print('\nDataset updated and saved\n')
+
     return data
+
     
 
 def load_data(tickers, from_date, to_date, freq):
+    """
+    Downloads price data using custom FRED-based loader or falls back to yfinance.
+    """
     try:
-        df = ticker_download(tickers, from_date, freq)
-    except:
-        df = yf.download(tickers, start=from_date, end=to_date, interval="1" + freq, auto_adjust=False)
-
-        # Extract 'Adj Close' prices and ensure columns are tickers
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df['Adj Close']
-        else:
-            # Single ticker download returns flat columns
-            df = df[['Adj Close']].rename(columns={'Adj Close': tickers[0]})
-
-        df = df.apply(pd.to_numeric, errors='coerce')
+        df = ticker_download(tickers, from_date, freq, verbose=False)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise ValueError("FRED download returned invalid or empty data.")
+    except Exception as e:
+        print(f"FRED download failed: {e}")
+        df = fallback_yfinance(tickers, from_date, to_date, freq)
 
     df.index = pd.to_datetime(df.index, errors='coerce')
+    if df.index.isnull().any():
+        print("Warning: Dropping rows with invalid dates.")
+        df = df[~df.index.isnull()]
+
     df.sort_index(inplace=True)
+    df = df.reindex(columns=tickers)
     return df
 
+def fallback_yfinance(tickers, from_date, to_date, freq):
+    print("\nFalling back to yfinance...\n")
+    interval = "1" + freq.lower()
+    df = yf.download(tickers, start=from_date, end=to_date, interval=interval, auto_adjust=False)
 
-def ticker_download(tickers, from_date, freq):
-    # df = pdr.DataReader(tickers, 'fred', start=from_date, end=to_date) # Download data using DataReader
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df['Adj Close']
+    else:
+        df = df[['Adj Close']].rename(columns={'Adj Close': tickers[0]})
+
+    return df.apply(pd.to_numeric, errors='coerce')
+
+
+
+
+def ticker_download(tickers, from_date, freq, verbose=True):
+    """
+    Downloads time series data for given FRED tickers starting from `from_date` using the global API key.
+    """
     df = pd.DataFrame()
+
     for ser in tickers:
-        tmp_json = requests.get(f'{FRED_URL}/series/observations?series_id={ser}&api_key={API_KEY}&file_type=json&observation_start={from_date}&frequency={freq}').json()
-        new_set = pd.DataFrame(tmp_json['observations'], columns=['date', 'value']).rename(columns={'value': ser}).set_index('date')
-        for col in new_set.select_dtypes(exclude=['float64']).columns:        
-            new_set[col] = pd.to_numeric(new_set[col], errors='coerce')
-            new_set[col] = new_set[col].astype(float)
-        new_set.dropna(inplace=True)
-        df = pd.merge(df, new_set, how='outer', left_index=True, right_index=True)
+        url = (
+            f"{FRED_URL}/series/observations?"
+            f"series_id={ser}&api_key={API_KEY}&file_type=json"
+            f"&observation_start={from_date}&frequency={freq}"
+        )
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            tmp_json = response.json()
+
+            if 'observations' not in tmp_json or not tmp_json['observations']:
+                if verbose:
+                    print(f"No observations found for {ser}")
+                continue
+
+            new_set = pd.DataFrame(tmp_json['observations'], columns=['date', 'value'])
+            new_set.rename(columns={'value': ser}, inplace=True)
+            new_set['date'] = pd.to_datetime(new_set['date'], errors='coerce')
+            new_set.set_index('date', inplace=True)
+            new_set[ser] = pd.to_numeric(new_set[ser], errors='coerce')
+            new_set.dropna(inplace=True)
+
+            df = pd.merge(df, new_set, how='outer', left_index=True, right_index=True)
+
+        except Exception as e:
+            if verbose:
+                print(f"Error fetching {ser} from FRED: {e}")
+            continue
+
+    df.sort_index(inplace=True)
+    df = df[~df.index.duplicated()]
     return df
+
 
 
 ################################## SPREAD ANALYSIS ####################################
@@ -316,7 +378,7 @@ def market_analysis(data, tickers):
 
 def load_market_index_data(from_date, today, file, tickers):
     try:
-        data = pd.read_csv(f'Tickers/{file}.csv', index_col=0, parse_dates=True, dayfirst=True, header=[0, 1])
+        data = pd.read_csv(f'datasets/{file}.csv', index_col=0, parse_dates=True, dayfirst=True, header=[0, 1])
     except Exception:
         data = yf.download(tickers, from_date, today, interval="1d", auto_adjust=False)
         data = data.swaplevel(axis=1)
@@ -324,7 +386,7 @@ def load_market_index_data(from_date, today, file, tickers):
         data = data.astype('float64')
         data.index = data.index.strftime('%d-%m-%Y')
         data = data.loc[:, tickers]
-        data.to_csv(f'Tickers/{file}.csv', index=True)
+        data.to_csv(f'datasets/{file}.csv', index=True)
 
     return data.loc[:, tickers]
 
