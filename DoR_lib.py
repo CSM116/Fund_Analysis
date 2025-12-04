@@ -4,12 +4,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from datetime import date
+import time  
+import re
 
 import ipywidgets as widgets
 from IPython.display import display
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.io as pio
+
 
 def add_return_features(df):
     adj_close = df.get('Adj Close', df['Close'])
@@ -25,9 +28,10 @@ def add_return_features(df):
             ], axis=1).max(axis=1) / df['Open']
         }
     )
-    return df
+    return df.copy()
 
 def add_return_features_multistock(df):
+    df = df.copy()
     # 2. Clean per ticker
     for ticker in df.columns.levels[0]:   
         # 3. Generate return features per ticker
@@ -45,7 +49,7 @@ def add_return_features_multistock(df):
     
         df[(ticker, 'True Range')] = pd.concat([diff_h_l, diff_h_c, diff_l_c], axis=1).max(axis=1) / df[(ticker, 'Open')]
        
-    return df
+    return df.copy()
 
 
     
@@ -185,9 +189,9 @@ def plot_return_distribution(df, mean_ret, std_ret, return_col='C-C Return', bin
     DoR['Cum. Prob.'] = DoR['Probability'].cumsum()
 
     # Plot
-    fig, ax = plt.subplots(figsize=(12, 5), tight_layout=True)
-    ax.grid(visible=True, color='grey', linestyle='-.', linewidth=0.5, alpha=0.6)
-    N, _, patches = ax.hist(df[return_col], bins=bin_lims)
+    fig, ax = plt.subplots(figsize=(13, 7), tight_layout=True)
+    # ax.grid(visible=True, color='grey', linestyle='-.', linewidth=0.5, alpha=0.6)
+    N, _, patches = ax.hist(df[return_col], bins=bin_lims, alpha=0.9)
 
     fracs = (N ** 0.2) / N.max()
     norm = colors.Normalize(fracs.min(), fracs.max())
@@ -195,19 +199,24 @@ def plot_return_distribution(df, mean_ret, std_ret, return_col='C-C Return', bin
         patch.set_facecolor(plt.cm.viridis(norm(frac)))
 
     # Highlight latest return
+    txt_fontsize = 13
     latest_val = df[return_col].iloc[-1]
     ax.plot(latest_val, 0, 'ro')  # Red dot
     rank = (df[return_col] < latest_val).sum() / len(df)
-    txt = f"{df.index[-1]} {latest_val:.5f} | %rank: {rank:.2f}"
+    txt = f"{df.index[-1].strftime('%d-%m-%Y')} ret: {latest_val:.5f} | %rank: {rank:.2f}"
     ax.annotate(txt, (latest_val, 0), xytext=(latest_val, max(N)*0.1),
-                arrowprops=dict(arrowstyle="->", facecolor='red'), color='red')
+                arrowprops=dict(arrowstyle="->", facecolor='red'), color='red', fontsize=txt_fontsize)
     
-
+    label_fontsize = 15
+    tick_fontsize = 12
+    title_fontsize = 17
+    ax.tick_params(axis='x', labelsize=tick_fontsize)
+    ax.tick_params(axis='y', labelsize=tick_fontsize)
     ax.set_xticks(bin_lims)
     ax.set_xticklabels(labels, rotation=45, ha='right')
-    ax.set_xlabel('Values')
-    ax.set_ylabel('Frequency')
-    ax.set_title(f'Distribution of {return_col}')
+    ax.set_xlabel('Values', fontsize=label_fontsize)
+    ax.set_ylabel('Frequency', fontsize=label_fontsize)
+    ax.set_title(f'Distribution of {return_col}', fontsize=title_fontsize, fontweight='bold')
     plt.tight_layout()
     plt.show()
     
@@ -239,7 +248,7 @@ def DoR_Analysis(df):
     display(controls)
 
 
-def plot_posneg_area(df, return_col='C-C Return'):
+def plot_posneg_area(df, return_col='C-C Return', fig_dir=None):
     desc = return_col
     df = df.dropna(subset=[desc]).copy()
     
@@ -250,13 +259,30 @@ def plot_posneg_area(df, return_col='C-C Return'):
     fig.add_trace(go.Scatter(x=df.index, y=df['pos'], name='Positive', fill='tozeroy', line=dict(color='green')))
     fig.add_trace(go.Scatter(x=df.index, y=df['neg'], name='Negative', fill='tozeroy', line=dict(color='red')))
 
-    fig.update_layout(title=f"<b>Positive & Negative {desc}</b>", title_x=0.5,
-                      margin=dict(l=20, r=30, t=50, b=30),
-                      xaxis=dict(rangeslider_visible=True))
+    fig.update_layout(modebar_add=['toImage'], title=f"<b>Positive & Negative {desc}</b>", title_x=0.5,
+                      margin=dict(l=20, r=30, t=50, b=70),
+                      xaxis=dict(rangeslider_visible=True),
+                      legend=dict(orientation="h", yanchor="top", y=0.95,          
+                            xanchor="left", x=0.02)
+                     )
     fig.show()
 
+    if fig_dir:
+        safe_name = re.sub(r'[^A-Za-z0-9_-]+', '', desc)
+        out_path = fig_dir / f"posneg_{safe_name}.svg"
 
-def full_DoR_analysis(df, return_col):    
+        # Define the button
+        save_button = widgets.Button(description="💾 Save Series", button_style='success')
+
+        def save_fig(_):
+            fig.write_image(str(out_path), format="svg")
+            print(f"Saved: {out_path}")
+
+        save_button.on_click(save_fig)
+        display(save_button)
+        
+
+def full_DoR_analysis(df, return_col, fig_dir=None):    
     print(f"\n{return_col} Distribution:\n")
     posneg_df, std_df, mean_ret, std_ret = analyze_returns(df, return_col=return_col)
     DoR = plot_return_distribution(df, mean_ret, std_ret, return_col=return_col)
@@ -268,4 +294,4 @@ def full_DoR_analysis(df, return_col):
     display(atr_df)
     
     # Plot positive/negative area chart
-    plot_posneg_area(df[[return_col]], return_col)
+    plot_posneg_area(df[[return_col]], return_col, fig_dir=fig_dir)

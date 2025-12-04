@@ -142,67 +142,82 @@ def ticker_download(tickers, from_date, freq, verbose=True):
 
 ################################## SPREAD ANALYSIS ####################################
 
-def spread_analysis(data, tickers):
-    def spread_analysis_helper(t1, t2):
+def spread_analysis(data, tickers, mode='raw', fig_dir=None):
+    def spread_analysis_helper(t1, t2, mode):
         if t1 == t2:
             print("Please select two different tickers.")
             return
 
         # Extract 'Adj Close' for both tickers
-        try:
+        if isinstance(data.columns, pd.MultiIndex):
             x1 = data[(t1, 'Adj Close')]
             x2 = data[(t2, 'Adj Close')]
-        except:
+        else:
             x1 = data[t1]
             x2 = data[t2]
 
         descriptions = get_ticker_descriptions([t1, t2])
-        ticker1_desc = descriptions.get(t1, t1)
-        ticker2_desc = descriptions.get(t2, t2)
-        ticker1_desc = ticker1_desc[:70]
-        ticker2_desc = ticker2_desc[:70]
-
+        ticker1_desc = descriptions.get(t1, t1)[:70]
+        ticker2_desc = descriptions.get(t2, t2)[:70]
     
-        # Align on index and compute spread
-        df = pd.DataFrame({
-            'Spread': x1 - x2
-        }).dropna()
+        # Align once, vectorized
+        x1, x2 = x1.align(x2, join='inner')
+        
+        # Compute spread by mode
+        mode = mode.lower()
+        if mode == 'raw':
+            spread = (x1 - x2).dropna()
+            y_label = "Price Spread (Adj Close)"
+            title_suffix = "Raw Difference"
+        elif mode == 'normalized':
+            pair = pd.concat([x1, x2], axis=1, keys=['x1','x2']).dropna()
 
-        df['pos'] = np.maximum(df['Spread'], 0)
-        df['neg'] = np.minimum(df['Spread'], 0)
+            # choose first valid, non-zero bases
+            base1 = pair['x1'].replace(0, np.nan).iloc[0]
+            base2 = pair['x2'].replace(0, np.nan).iloc[0]
+            
+            x1n = pair['x1'] / base1
+            x2n = pair['x2'] / base2
+            
+            spread = (100 * (x1n - x2n))
 
-        # Plot
+            y_label = "Normalized Spread (pct points)"
+            title_suffix = "Normalized"
+        elif mode == 'log':
+            spread = (np.log(x1) - np.log(x2)).dropna()
+            y_label = "Log Ratio"
+            title_suffix = "Log Ratio"
+        else:
+            raise ValueError("mode must be 'raw', 'normalized', or 'log'")
+            
+        df = spread.to_frame(name='Spread')
+        df['pos'] = np.maximum(df['Spread'], 0.0)
+        df['neg'] = np.minimum(df['Spread'], 0.0)
+
+        # Plotting
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df.index, y=df['pos'], name='Positive', fill='tozeroy'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['neg'], name='Negative', fill='tozeroy'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['pos'], name='Positive (t1 > t2)', fill='tozeroy',line=dict(color='green'), fillcolor='rgba(0,200,0,0.3)'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['neg'], name='Negative', fill='tozeroy', line=dict(color='red'), fillcolor='rgba(255,0,0,0.3)'))
 
-        fig.update_xaxes(
-            rangeslider_visible=True,
-            rangeselector=dict(
-                buttons=[
-                    dict(count=1, label="1m", step="month", stepmode="backward"),
-                    dict(count=6, label="6m", step="month", stepmode="backward"),
-                    dict(count=1, label="YTD", step="year", stepmode="todate"),
-                    dict(count=1, label="1y", step="year", stepmode="backward"),
-                    dict(count=2, label="2y", step="year", stepmode="backward"),
-                    dict(count=5, label="5y", step="year", stepmode="backward"),
-                    dict(count=10, label="10y", step="year", stepmode="backward"),
-                    dict(step="all")
-                ]
-            )
-        )
+        fig.add_hline(y=0, line=dict(color='black', width=1, dash='dot'))
+
+        fig.update_yaxes(fixedrange=False, autorange=True)
 
         fig.update_layout(
-            title=dict(
-                text=f"<b>{ticker1_desc} vs<br>{ticker2_desc} Spread</b>",
-                x=0.5,
-                font=dict(
-                    size=12  # adjust size as needed
-                )
-            ),
-            margin=dict(l=40, r=10, t=90, b=20)
+            title=dict(text=f"<b>{ticker1_desc} vs <br>{ticker2_desc} Spread - {title_suffix}</b>", x=0.5, font=dict(size=12 )),
+            xaxis_title="Date",
+            legend=dict(orientation="h", yanchor="top", y=-0.5, xanchor="center", x=0.5),
+            margin=dict(l=50, r=30, t=90, b=50),
+            xaxis=dict(rangeslider_visible=True),
+            yaxis_autorange=True
         )
-
+        # Save if requested
+        if fig_dir:
+            safe_t1 = re.sub(r'[^A-Za-z0-9_-]+', '', str(t1))
+            safe_t2 = re.sub(r'[^A-Za-z0-9_-]+', '', str(t2))
+            out_path = fig_dir / f"spread_{safe_t1}_minus_{safe_t2}_{title_suffix}.svg"
+            fig.write_image(str(out_path), format="svg") 
+        
         fig.show()
 
     descriptions = get_ticker_descriptions(tickers)
@@ -210,10 +225,17 @@ def spread_analysis(data, tickers):
     pd.set_option('display.max_colwidth', None)  # Show full descriptions
     display(df)
 
+    # Widgets: add a mode selector
+    mode_dd = widgets.Dropdown(
+        options=[('Raw', 'raw'), ('Normalized', 'normalized'), ('Log Ratio', 'log')],
+        value=mode,
+        description='Mode:'
+    )
     controls = widgets.interactive(
         spread_analysis_helper,
         t1=widgets.Dropdown(options=tickers, description='Ticker 1'),
-        t2=widgets.Dropdown(options=tickers, description='Ticker 2')
+        t2=widgets.Dropdown(options=tickers, description='Ticker 2'),
+        mode=mode_dd
     )
     display(controls)
 
@@ -226,9 +248,17 @@ def returns(df, col, shift_periods):
     return new_col
     
 
-    
+def split_title(text, max_len=50):
+    if len(text) <= max_len:
+        return text
+    midpoint = len(text) // 2
+    space_idx = text.find(" ", midpoint)
+    if space_idx == -1:  # no space found after midpoint
+        space_idx = midpoint
+    return text[:space_idx] + "<br>" + text[space_idx + 1:]
 
-def plot_select(data, tickers):
+
+def plot_select(data, tickers, fig_dir=None):
     def plot_ticker(tic):
         if tic not in data.columns:
             print(f"{tic} not found in data.")
@@ -241,30 +271,24 @@ def plot_select(data, tickers):
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=series.index, y=series.values, name=tic))
 
-        fig.update_xaxes(
-            rangeslider_visible=True,
-            rangeselector=dict(
-                buttons=[
-                    dict(count=1, label="1m", step="month", stepmode="backward"),
-                    dict(count=3, label="3m", step="month", stepmode="backward"),
-                    dict(count=6, label="6m", step="month", stepmode="backward"),
-                    dict(count=1, label="YTD", step="year", stepmode="todate"),
-                    dict(count=1, label="1y", step="year", stepmode="backward"),
-                    dict(count=2, label="2y", step="year", stepmode="backward"),
-                    dict(count=5, label="5y", step="year", stepmode="backward"),
-                    dict(step="all")
-                ]
-            )
-        )
+        fig.update_xaxes(rangeslider_visible=True)
+
+        wrapped_desc = split_title(desc, max_len=50)
 
         fig.update_layout(
             title=dict(
-                text=f"<b>{desc} — Yield</b>",  # You can adjust to "Price" or anything else
+                text=f"<b>{wrapped_desc}</b>",
                 x=0.5,
                 font=dict(size=16)
             ),
             margin=dict(l=20, r=20, t=90, b=20)
         )
+        
+        if fig_dir:
+            safe_tic = re.sub(r'[^A-Za-z0-9._-]+', '', str(tic))
+            out_path = fig_dir / f"TimeSeries_{safe_tic}.svg"
+            fig.write_image(str(out_path), format="svg")
+        
         fig.show()
 
     dropdown = widgets.Dropdown(options=tickers, description='Ticker:')
@@ -278,11 +302,14 @@ def plot_select(data, tickers):
 
 ####################### INDEXES MARKET ANALYSIS ##########################
 
-def market_analysis(data, tickers):    
+def market_analysis(data, tickers, fig_dir=None):    
 
     def market_analysis_helper(tic1):
         df = data[tic1].copy()
         df = df.dropna()
+        # Ensure the index is a DatetimeIndex
+        df.index = pd.to_datetime(df.index, errors='coerce', dayfirst=True)
+
         df['RollHigh'] = df['High'].expanding().max()
         df['RollBearLevel'] = df['RollHigh'] * 0.8
         df['BullIndex'] = np.where(df['Adj Close'] > df['RollBearLevel'], df['Adj Close'], np.nan)
@@ -323,7 +350,7 @@ def market_analysis(data, tickers):
                 if indx_lim is not None and not df.loc[indx_lim:, 'BullIndex'].dropna().empty:
                     indx = df.loc[indx_lim:, 'BullIndex'].idxmax()
                     ypos = df.loc[indx, 'BullIndex']
-                    txt = indx.strftime('%d-%b-%y') + " " + "{:.2f}".format(ypos)
+                    txt = f"{pd.to_datetime(indx).strftime('%d-%b-%y')} {ypos:.2f}"
                     fig.add_annotation(x=indx, y=ypos, ax=ax_lef, ay=ay_lef, text=txt, showarrow=True, 
                                        arrowhead=1, arrowcolor='green', font=dict(color='green', size=14))
 
@@ -338,7 +365,7 @@ def market_analysis(data, tickers):
                 if indx_lim is not None and not df.loc[indx_lim:, 'BearIndex'].dropna().empty:
                     indx = df.loc[indx_lim:, 'BearIndex'].idxmin()
                     ypos = df.loc[indx, 'BearIndex']
-                    txt = indx.strftime('%d-%b-%y') + " " + "{:.2f}".format(ypos)
+                    txt = f"{pd.to_datetime(indx).strftime('%d-%b-%y')} {ypos:.2f}"
                     fig.add_annotation(x=indx, y=ypos, ax=ax_lef, ay=ay_lef, text=txt, showarrow=True, 
                                        arrowhead=1, arrowcolor='red', font=dict(color='red', size=14))
 
@@ -353,6 +380,12 @@ def market_analysis(data, tickers):
             fig.update_layout(title_text=f"{desc} - Bull/Bear Zone", title_x=0.5)
             fig.update_layout(margin=dict(l=50, r=30, t=60, b=20))
             fig.update_traces(showlegend=False)
+            
+            if fig_dir:
+                safe_tic = re.sub(r'[^A-Za-z0-9_-]+', '', tic1)
+                out_path = fig_dir / f"bull_bear_{safe_tic}.svg"
+                fig.write_image(str(out_path), format="svg")
+
             fig.show()
 
         fig = go.Figure()    
@@ -442,7 +475,7 @@ def merge_yoy_ticker(data, ticker, from_date, to_date, interval, ref_col_index, 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-def plot_yoy_lagged_correlation(data, window, ticker):
+def plot_yoy_lagged_correlation(data, window, ticker, fig_dir):
     """
     Plots rolling correlation between a macroeconomic YoY series and a financial ticker's YoY values
     at multiple lags. Highlights the lag with the highest average correlation.
@@ -502,13 +535,28 @@ def plot_yoy_lagged_correlation(data, window, ticker):
         font=dict(size=13)
     )
 
+    y_leg_pos = -0.15
+    x_leg_pos = 0.5
     fig_corr.update_layout(
         title=f"Rolling Correlation: {ticker_desc} vs {macro_desc}",
         xaxis_title="Date",
         yaxis_title="Correlation",
         title_x=0.5,
-        height=500
+        autosize=True,
+        height=500,
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=y_leg_pos,
+            xanchor="center",
+            x=x_leg_pos
+        )
     )
+    # Save rolling correlation figure
+    safe_macro = macro_col.replace(" ", "_").replace("^", "")
+    safe_tick = ticker.replace(" ", "_").replace("^", "")
+    corr_path = fig_dir / f"rolling_corr_{safe_tick}_vs_{safe_macro}_w{window}.svg"
+    fig_corr.write_image(str(corr_path), format="svg", engine="kaleido")
     fig_corr.show()
 
     # Overlay time series
@@ -520,10 +568,22 @@ def plot_yoy_lagged_correlation(data, window, ticker):
         title=f"YoY Comparison: {ticker_desc} vs {macro_desc}",
         xaxis_title="Date",
         title_x=0.5,
-        height=500
+        autosize=True,
+        height=500,
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=y_leg_pos,
+            xanchor="center",
+            x=x_leg_pos
+        )
     )
+
     fig_ts.update_yaxes(title_text=macro_desc, secondary_y=False)
     fig_ts.update_yaxes(title_text=ticker_desc, secondary_y=True)
+    # Save YoY overlay figure
+    ts_path = fig_dir / f"yoy_overlay_{safe_tick}_vs_{safe_macro}.svg"
+    fig_ts.write_image(str(ts_path), format="svg", engine="kaleido")
     fig_ts.show()
 
     print(f"\nConclusion: The highest rolling correlation occurs at {best_lag},")
@@ -574,6 +634,10 @@ def get_ticker_descriptions(tickers):
         if description is None:
             description = ticker
 
+        # Replace 'Gross Domestic Product' with 'GDP'
+        if isinstance(description, str):
+            description = description.replace('Gross Domestic Product', 'GDP')
+
         descriptions[ticker] = description
 
     return descriptions
@@ -587,7 +651,7 @@ import ipywidgets as widgets
 import plotly.graph_objs as go
 from IPython.display import display
 
-def yield_curve(dataset, tips):
+def yield_curve(dataset, tips=['TIPS', 'no-TIPS'], fig_dir=None):
     date_slider1 = widgets.SelectionSlider(
         options=dataset.index,
         description='Blue Select:',
@@ -638,17 +702,26 @@ def yield_curve(dataset, tips):
                 yshift=17,
                 xref='x', yref='y'
             ) for x, y in zip(x_vals, y_vals)]
-
+            
+        title_text = f"<b>US Yield Curve - {'TIPS' if tips == 'TIPS' else 'Nominal'} Comparative Analysis</b>"
+        
         fig = go.Figure(
             data=[make_trace(y1, labels, str(day1.date())), make_trace(y2, labels, str(day2.date()))],
             layout=go.Layout(
-                title=dict(text='<b>US Yield Curve - Comparative Analysis</b>', x=0.5),
+                title=dict(text=title_text, x=0.5),
                 yaxis=dict(title='<b>Percent</b>'),
                 legend=dict(orientation='v', x=-0.15, y=-0.3),
                 annotations=make_annotations(labels, y1, color1, -17) + make_annotations(labels, y2, color2, 17)
             )
         )
 
+        if fig_dir:
+            safe_tips = re.sub(r'[^A-Za-z0-9_-]+', '', str(tips))
+            safe_d1 = str(day1.date()).replace('-', '')
+            safe_d2 = str(day2.date()).replace('-', '')
+            out_path = fig_dir / f"yield_curve_{safe_tips}_{safe_d1}_vs_{safe_d2}.svg"
+            fig.write_image(str(out_path), format="svg")
+            
         fig.show()
 
     controls = widgets.interactive(plot_curve, day1=date_slider1, day2=date_slider2, tips=tips)
